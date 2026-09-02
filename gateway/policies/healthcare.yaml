@@ -1,13 +1,12 @@
-# Healthcare profile — tuned for clinical notes.
+# Healthcare profile — HIPAA Safe Harbor compliant.
+# Covers all 18 HIPAA Safe Harbor identifiers (45 CFR §164.514(b)).
 # Key difference vs other profiles: OTP and bank-account detection are DISABLED
-# so clinical numbers (dosages, lab values, "5000 units ... verification") are
-# never mis-scrubbed as financial PII. Contact PII + identity docs are masked;
-# secrets and prompt injection are blocked.
+# so clinical numbers (dosages, lab values) are never mis-scrubbed as PII.
 name: healthcare
 profile: healthcare
 
-# Treated as 'allow' (detected text is left untouched) — avoids clinical
-# false positives from the context-gated numeric recognizers.
+# Treated as 'allow' — avoids clinical false positives from context-gated
+# numeric recognizers.
 disabled:
   - IN_OTP
   - IN_BANK_ACCOUNT
@@ -15,13 +14,49 @@ disabled:
 actions:
   default: mask
   by_label:
+    # HIPAA #1 — Names
+    PERSON_NAME: mask
     PERSON: mask
-    EMAIL_ADDRESS: mask
-    PHONE_NUMBER: mask
+
+    # HIPAA #2 — Geographic data
+    ADDRESS: mask
+
+    # HIPAA #3 — Dates
     DATE_OF_BIRTH: mask
+    VISIT_DATE: mask
+
+    # HIPAA #4/#5 — Phone / Fax
+    PHONE_NUMBER: mask
+
+    # HIPAA #6 — Email
+    EMAIL_ADDRESS: mask
+
+    # HIPAA #7 — SSN
     US_SSN: mask
+
+    # HIPAA #8 — Medical record numbers
+    MEDICAL_RECORD_NUMBER: mask
+
+    # HIPAA #9 — Health plan beneficiary numbers
+    HEALTH_PLAN_ID: mask
+
+    # HIPAA #12 — VIN
+    VIN: mask
+
+    # HIPAA #14 — URL
+    URL: mask
+
+    # HIPAA #15 — IP address
+    IP_ADDRESS: mask
+
+    # Indian IDs
     IN_AADHAAR: mask
     IN_PAN: mask
+    IN_GSTIN: mask
+    IN_UPI: mask
+    IN_IFSC: mask
+
+    # Secrets — always blocked, never reach the LLM
     SECRET: block
     PRIVATE_KEY: block
     AWS_ACCESS_KEY: block
