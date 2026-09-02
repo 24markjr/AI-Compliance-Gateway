@@ -25,7 +25,7 @@ from app.compliance.masker import apply_masking
 from app.compliance.overlap import resolve_overlaps
 from app.compliance.policy import Policy, load_policy
 from app.compliance.types import Action, ComplianceResult, PIIEntity
-from app.compliance.vault import RedisVault
+from app.compliance.vault import InMemoryVault, RedisVault
 from app.config import DetectionEngine, Settings
 
 
@@ -35,7 +35,7 @@ class ComplianceEngine:
         detectors: list[Detector],
         injection: InjectionDetector,
         policy: Policy,
-        vault: RedisVault,
+        vault: RedisVault | InMemoryVault,
         *,
         offload_detection: bool = False,
     ) -> None:
@@ -118,7 +118,7 @@ class ComplianceEngine:
         )
 
 
-def build_compliance_engine(settings: Settings, vault: RedisVault) -> ComplianceEngine:
+def build_compliance_engine(settings: Settings, vault: RedisVault | InMemoryVault) -> ComplianceEngine:
     """Assemble the engine from configuration.
 
     Regex engine is always available (default + fallback). Presidio is wired in

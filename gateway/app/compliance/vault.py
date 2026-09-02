@@ -218,3 +218,90 @@ class RedisVault:
             await self._redis.delete(*self._keys(session_id))
         except (RedisError, asyncio.TimeoutError, OSError) as exc:
             raise VaultUnavailable(str(exc)) from exc
+
+
+class InMemoryVault:
+    """Pure-Python in-process vault — same async API as RedisVault.
+
+    Used automatically when Redis is unreachable (e.g. free-tier deploy without
+    Upstash configured). Tokens only live for the duration of one request because
+    the mapping dict is session-scoped in memory; that is fine for the analyze
+    pipeline which masks and rehydrates within the same request.
+
+    No encryption at rest (data never leaves the process), no persistence across
+    restarts. Suitable for development and free-tier production where Redis is not
+    available.
+    """
+
+    def __init__(
+        self,
+        *,
+        token_style: str = "placeholder",
+    ) -> None:
+        # {session_id: {"fwd": {field: token}, "rev": {token: original}, "cnt": {label: int}}}
+        self._store: dict[str, dict] = {}
+        self._token_style = token_style
+
+    def _session(self, session_id: str) -> dict:
+        if session_id not in self._store:
+            self._store[session_id] = {"fwd": {}, "rev": {}, "cnt": {}}
+        return self._store[session_id]
+
+    def _candidate_token(self, label: str, value: str) -> str:
+        if self._token_style != "format_preserving":
+            return ""
+        up = label.upper()
+        if up in {"EMAIL", "EMAIL_ADDRESS"}:
+            return "redacted.user@example.invalid"
+        if up in {"PHONE", "PHONE_NUMBER"}:
+            digits = re.sub(r"\D", "", value)
+            return "+91 55500 00000" if len(digits) >= 10 else "55500"
+        return ""
+
+    async def get_or_create_many(
+        self, items: list[tuple[str, str]], session_id: str
+    ) -> list[str]:
+        sess = self._session(session_id)
+        fwd, rev, cnt = sess["fwd"], sess["rev"], sess["cnt"]
+        tokens: list[str] = []
+        for label, value in items:
+            if not value or not value.strip():
+                raise ValueError("InMemoryVault: value must be non-empty")
+            norm = normalize_label(label)
+            field = f"{norm}\x00{_canonical(value)}"
+            if field in fwd:
+                tokens.append(fwd[field])
+            else:
+                idx = cnt.get(norm, 0) + 1
+                cnt[norm] = idx
+                supplied = self._candidate_token(norm, value)
+                if supplied and supplied not in rev:
+                    token = supplied
+                elif supplied:
+                    token = f"{supplied}_{idx}"
+                else:
+                    token = f"<{norm}_{idx}>"
+                fwd[field] = token
+                rev[token] = value
+                tokens.append(token)
+        return tokens
+
+    async def get_or_create(self, label: str, value: str, session_id: str) -> str:
+        tokens = await self.get_or_create_many([(label, value)], session_id)
+        return tokens[0]
+
+    async def original(self, token: str, session_id: str) -> str | None:
+        return self._session(session_id)["rev"].get(token)
+
+    async def mapping(self, session_id: str) -> dict[str, str]:
+        return dict(self._session(session_id)["rev"])
+
+    async def stats(self, session_id: str) -> dict:
+        sess = self._session(session_id)
+        return {
+            "total_mappings": len(sess["fwd"]),
+            "by_label": {k: int(v) for k, v in sess["cnt"].items()},
+        }
+
+    async def clear(self, session_id: str) -> None:
+        self._store.pop(session_id, None)

@@ -22,7 +22,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from prometheus_fastapi_instrumentator import Instrumentator
 
-from app.compliance.vault import VaultUnavailable
+from app.compliance.vault import InMemoryVault, VaultUnavailable
 
 from app import __version__
 from app.config import Settings, get_settings
@@ -55,21 +55,34 @@ async def lifespan(app: FastAPI):
 
     # Shared, connection-pooled HTTP client (reused across all upstream calls).
     app.state.http_client = build_async_client(settings.upstream_timeout_seconds)
-    # Redis client/pool. Created eagerly but NOT pinged here so the app can boot
-    # even if Redis is briefly unavailable; /ready reports its true status.
-    # Short connect timeout so probes fail fast instead of hanging.
-    app.state.redis = aioredis.from_url(
+    # Redis client/pool. Probed with a quick PING at startup so we can fall back
+    # to InMemoryVault immediately rather than discovering the problem at request time.
+    redis_client = aioredis.from_url(
         settings.redis_url,
         decode_responses=True,
         socket_connect_timeout=settings.redis_timeout_seconds,
         socket_timeout=settings.redis_timeout_seconds,
     )
-    app.state.vault = RedisVault(
-        app.state.redis,
-        ttl_seconds=settings.vault_ttl_seconds,
-        token_style=settings.vault_token_style,
-        encryption_key=settings.vault_encryption_key,
-    )
+    try:
+        await redis_client.ping()
+        log.info("gateway: Redis vault connected (%s)", settings.redis_url.split("@")[-1])
+        app.state.redis = redis_client
+        app.state.vault = RedisVault(
+            redis_client,
+            ttl_seconds=settings.vault_ttl_seconds,
+            token_style=settings.vault_token_style,
+            encryption_key=settings.vault_encryption_key,
+        )
+    except Exception as _redis_err:  # noqa: BLE001
+        log.warning(
+            "gateway: Redis unavailable (%s) — falling back to InMemoryVault. "
+            "PHI tokens will NOT persist across requests or workers. "
+            "Set REDIS_URL in your environment to enable the full vault.",
+            _redis_err,
+        )
+        await redis_client.aclose()
+        app.state.redis = None
+        app.state.vault = InMemoryVault(token_style=settings.vault_token_style)
     app.state.engine = build_compliance_engine(settings, app.state.vault)
     app.state.provider = get_provider(settings, app.state.http_client)
     # Registries for per-request provider/policy selection (frontend selectors).
@@ -101,7 +114,8 @@ async def lifespan(app: FastAPI):
         if app.state.db_pool is not None:
             await app.state.db_pool.close()
         await app.state.http_client.aclose()
-        await app.state.redis.aclose()
+        if app.state.redis is not None:
+            await app.state.redis.aclose()
         log.info("gateway shut down cleanly")
 
 
